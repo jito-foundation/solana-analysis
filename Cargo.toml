@@ -1,0 +1,16 @@
+[package]
+name = "mev-stake-analysis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = "0.28.0"
+clap = { version = "4.4.11", features = ["derive", "env"] }
+env_logger = "0.10.1"
+jito-tip-distribution = { git = "https://github.com/jito-foundation/jito-programs", rev = "b8f8d315306d6ac32450bd1aa23b7c1322a83bc7", features = ["no-entrypoint"] }
+log = "0.4.20"
+solana-rpc-client = "1.16.23"
+solana-rpc-client-api = "1.16.23"
+solana-sdk = "1.16.23"
+solana-storage-bigtable = "1.16.23"
+tokio = { version = "1.35.0", features = ["full"] }
