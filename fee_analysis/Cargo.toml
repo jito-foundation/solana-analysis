@@ -20,3 +20,4 @@ solana-storage-bigtable = { workspace = true }
 solana-transaction-status = { workspace = true }
 tokio = { workspace = true }
 solana-runtime = { workspace = true }
+lazy_static = { workspace = true }

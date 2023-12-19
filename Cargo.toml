@@ -18,7 +18,7 @@ solana-rpc-client = "1.16.23"
 solana-rpc-client-api = "1.16.23"
 solana-sdk = "1.16.23"
 solana-storage-bigtable = "1.16.23"
-tokio = { version = "1.35.0", features = ["full"] }
+tokio = { version = "1.32.0", features = ["full"] }
 solana-account-decoder = "1.16.23"
 num_cpus = "1.16.0"
 itertools = "0.12.0"
@@ -26,3 +26,4 @@ futures = "0.3.29"
 futures-util = "0.3.29"
 solana-transaction-status = "1.16.23"
 solana-runtime = "1.16.23"
+lazy_static = "1.4.0"

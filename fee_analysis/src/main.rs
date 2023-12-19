@@ -2,6 +2,7 @@ use anchor_lang::solana_program::clock::Slot;
 use clap::Parser;
 use futures::future::join_all;
 use itertools::Itertools;
+use lazy_static::lazy_static;
 use log::warn;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
@@ -46,9 +47,10 @@ async fn main() {
     let args: Args = Args::parse();
 
     let slots: Vec<_> = (args.start_slot..args.end_slot).collect_vec();
-    let slot_chunks = slots.chunks(args.num_cpus).collect_vec();
+    let slot_chunks = slots.chunks(slots.len() / args.num_cpus).collect_vec();
+    println!("num slot_chunks: {:?}", slot_chunks.len());
 
-    let (sender, receiver) = channel(100_000);
+    let (sender, receiver) = channel(10_000);
     let futs = slot_chunks.into_iter().map(|slots| {
         let slots = slots.to_vec();
         let sender = sender.clone();
@@ -63,11 +65,20 @@ async fn main() {
 }
 
 async fn query_slot_fee_stats(sender: Sender<BlockFeeStats>, slots: Vec<u64>) {
-    let ledger_tool = LedgerStorage::new(true, None, None).await.unwrap();
+    let ledger_tool = loop {
+        match LedgerStorage::new(true, None, None).await {
+            Ok(l) => {
+                break l;
+            }
+            Err(e) => {
+                println!("error connecting: {:?}", e);
+            }
+        }
+    };
 
     for slots_chunk in slots.chunks(10) {
         match ledger_tool
-            .get_confirmed_blocks_with_data(&slots_chunk)
+            .get_confirmed_blocks_with_data(slots_chunk)
             .await
         {
             Ok(slots_blocks) => {
@@ -98,8 +109,8 @@ fn is_simple_vote_transaction(tx: &VersionedTransaction) -> bool {
     }
 }
 
-fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats> {
-    let tip_accounts: HashSet<Pubkey> = HashSet::from_iter([
+lazy_static! {
+    static ref TIP_ACCOUNTS: HashSet<Pubkey> = HashSet::from_iter([
         Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5").unwrap(),
         Pubkey::from_str("HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe").unwrap(),
         Pubkey::from_str("Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY").unwrap(),
@@ -109,7 +120,9 @@ fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats
         Pubkey::from_str("DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL").unwrap(),
         Pubkey::from_str("3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT").unwrap(),
     ]);
+}
 
+fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats> {
     let leader = block
         .rewards
         .iter()
@@ -144,7 +157,7 @@ fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats
         let pre_tx_balances = tx.get_status_meta().unwrap().pre_balances;
         let post_tx_balances = tx.get_status_meta().unwrap().post_balances;
         for (idx, account) in tx.account_keys().iter().enumerate() {
-            if tip_accounts.contains(account) {
+            if TIP_ACCOUNTS.contains(account) {
                 if post_tx_balances[idx] > pre_tx_balances[idx] {
                     jito_tips += post_tx_balances[idx] - pre_tx_balances[idx];
                 }
@@ -194,9 +207,7 @@ async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
             });
 
         count += 1;
-        if count % 10_000 == 0 {
-            println!("received {} blocks", count);
-        }
+        println!("received {} blocks", count);
     }
 
     // poor mans csv

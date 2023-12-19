@@ -1455,6 +1455,7 @@ dependencies = [
  "futures",
  "itertools 0.12.0",
  "jito-tip-distribution",
+ "lazy_static",
  "log",
  "num_cpus",
  "solana-account-decoder",
