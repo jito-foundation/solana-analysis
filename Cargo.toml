@@ -14,3 +14,4 @@ solana-rpc-client-api = "1.16.23"
 solana-sdk = "1.16.23"
 solana-storage-bigtable = "1.16.23"
 tokio = { version = "1.35.0", features = ["full"] }
+solana-account-decoder = "1.16.23"

@@ -2202,6 +2202,7 @@ dependencies = [
  "env_logger 0.10.1",
  "jito-tip-distribution",
  "log",
+ "solana-account-decoder",
  "solana-rpc-client",
  "solana-rpc-client-api",
  "solana-sdk",
