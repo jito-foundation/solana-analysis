@@ -12,7 +12,9 @@ use solana_storage_bigtable::LedgerStorage;
 use solana_transaction_status::ConfirmedBlock;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
+use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::time::sleep;
 
 #[derive(Parser)]
 struct Args {
@@ -62,7 +64,8 @@ async fn main() {
 
 async fn query_slot_fee_stats(sender: Sender<BlockFeeStats>, slots: Vec<u64>) {
     let ledger_tool = LedgerStorage::new(true, None, None).await.unwrap();
-    for slots_chunk in slots.chunks(25) {
+
+    for slots_chunk in slots.chunks(10) {
         match ledger_tool
             .get_confirmed_blocks_with_data(&slots_chunk)
             .await
