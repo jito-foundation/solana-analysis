@@ -179,9 +179,9 @@ async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
             .entry(stats.leader)
             .and_modify(|s| {
                 s.num_blocks += 1;
-                s.non_vote_fees_sol += s.non_vote_fees_sol;
-                s.vote_fees_sol += s.vote_fees_sol;
-                s.jito_tips_sol += s.jito_tips_sol;
+                s.non_vote_fees_sol += stats.non_vote_fees_sol;
+                s.vote_fees_sol += stats.vote_fees_sol;
+                s.jito_tips_sol += stats.jito_tips_sol;
             })
             .or_insert(AggregatedFeeStats {
                 num_blocks: 1,
