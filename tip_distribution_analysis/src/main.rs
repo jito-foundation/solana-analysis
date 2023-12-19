@@ -1,18 +1,14 @@
-use anchor_lang::{AccountDeserialize, AnchorDeserialize, Discriminator};
+use anchor_lang::Discriminator;
 use clap::Parser;
-use jito_tip_distribution::state::{ClaimStatus, Config};
+use jito_tip_distribution::state::ClaimStatus;
 use log::info;
 use solana_account_decoder::UiAccountEncoding;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_rpc_client_api::config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_rpc_client_api::filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
-use solana_sdk::account::ReadableAccount;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
-use solana_sdk::pubkey::Pubkey;
 use solana_sdk::stake;
 use solana_sdk::stake::state::StakeState;
-use solana_storage_bigtable::LedgerStorage;
-use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -94,20 +90,20 @@ async fn print_stake_account_info(rpc_client: &RpcClient) {
         min_rent_amount
     );
 
-    let excess_staked_accounts: Vec<_> = stake_accounts
-        .iter()
-        .filter_map(|(pubkey, stake_account)| {
-            let state = StakeState::deserialize(&mut stake_account.data.as_slice()).ok()?;
-            let delegation = state.delegation()?;
-            let excess = stake_account.lamports - delegation.stake - min_rent_amount;
-            info!(
-                "{}: delegation stake: {:?}, lamports: {}, rent: {}, excess: {}",
-                pubkey, delegation.stake, stake_account.lamports, min_rent_amount, excess
-            );
-
-            Some((pubkey, excess))
-        })
-        .collect();
+    // let excess_staked_accounts: Vec<_> = stake_accounts
+    //     .iter()
+    //     .filter_map(|(pubkey, stake_account)| {
+    //         let state = StakeState::deserialize(&mut stake_account.data.as_slice()).ok()?;
+    //         let delegation = state.delegation()?;
+    //         let excess = stake_account.lamports - delegation.stake - min_rent_amount;
+    //         info!(
+    //             "{}: delegation stake: {:?}, lamports: {}, rent: {}, excess: {}",
+    //             pubkey, delegation.stake, stake_account.lamports, min_rent_amount, excess
+    //         );
+    //
+    //         Some((pubkey, excess))
+    //     })
+    //     .collect();
 }
 
 #[tokio::main]
@@ -117,34 +113,17 @@ async fn main() {
     let args: Args = Args::parse();
 
     let rpc_client = RpcClient::new_with_timeout(args.rpc_url, Duration::from_secs(600));
-    //
-    // let pubkey = Pubkey::find_program_address(&[b"CONFIG_ACCOUNT"], &jito_tip_distribution::id()).0;
-    // info!("reading pubkey: {:?}", pubkey);
-    //
-    // let account = rpc_client.get_account(&pubkey).await.unwrap();
-    // let config = Config::try_deserialize(&mut account.data.as_slice()).unwrap();
-    // info!("config.authority: {:?}", config.authority);
-    // info!(
-    //     "config.expired_funds_account: {:?}",
-    //     config.expired_funds_account
-    // );
-    // info!("config.num_epochs_valid: {:?}", config.num_epochs_valid);
-    // info!(
-    //     "config.max_validator_commission_bps: {:?}",
-    //     config.max_validator_commission_bps
-    // );
-    // info!("config.bump: {:?}", config.bump);
 
-    // print_transaction_fees().await;
+    print_transaction_fees().await;
 
-    // print_claim_status_info(&rpc_client).await;
+    print_claim_status_info(&rpc_client).await;
 
-    // print_stake_account_info(&rpc_client).await;
+    print_stake_account_info(&rpc_client).await;
 }
 
 async fn print_transaction_fees() {
-    let pubkey = Pubkey::from_str("GZctHpWXmsZC1YHACTGGcHhYxjdRqQvTpYkb9LMvxDib").unwrap();
-    let ledger_storage = LedgerStorage::new(true, None, None).await.unwrap();
+    // let pubkey = Pubkey::from_str("GZctHpWXmsZC1YHACTGGcHhYxjdRqQvTpYkb9LMvxDib").unwrap();
+    // let ledger_storage = LedgerStorage::new(true, None, None).await.unwrap();
 
     // go through GZctHpWXmsZC1YHACTGGcHhYxjdRqQvTpYkb9LMvxDib, summing up transaction fees paid
 }

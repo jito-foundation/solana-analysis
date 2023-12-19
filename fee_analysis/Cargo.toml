@@ -1,0 +1,22 @@
+[package]
+name = "fee-analysis"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anchor-lang = { workspace = true }
+clap = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+itertools = { workspace = true }
+jito-tip-distribution = { workspace = true }
+log = { workspace = true }
+num_cpus = { workspace = true }
+solana-account-decoder = { workspace = true }
+solana-rpc-client = { workspace = true }
+solana-rpc-client-api = { workspace = true }
+solana-sdk = { workspace = true }
+solana-storage-bigtable = { workspace = true }
+solana-transaction-status = { workspace = true }
+tokio = { workspace = true }
+solana-runtime = { workspace = true }
