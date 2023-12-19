@@ -46,7 +46,7 @@ async fn main() {
     let slots: Vec<_> = (args.start_slot..args.end_slot).collect_vec();
     let slot_chunks = slots.chunks(args.num_cpus).collect_vec();
 
-    let (sender, receiver) = channel(10_000);
+    let (sender, receiver) = channel(100_000);
     let futs = slot_chunks.into_iter().map(|slots| {
         let slots = slots.to_vec();
         let sender = sender.clone();
@@ -62,7 +62,7 @@ async fn main() {
 
 async fn query_slot_fee_stats(sender: Sender<BlockFeeStats>, slots: Vec<u64>) {
     let ledger_tool = LedgerStorage::new(true, None, None).await.unwrap();
-    for slots_chunk in slots.chunks(10) {
+    for slots_chunk in slots.chunks(25) {
         match ledger_tool
             .get_confirmed_blocks_with_data(&slots_chunk)
             .await
@@ -191,7 +191,9 @@ async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
             });
 
         count += 1;
-        println!("received {} blocks", count);
+        if count % 10_000 == 0 {
+            println!("received {} blocks", count);
+        }
     }
 
     // poor mans csv
