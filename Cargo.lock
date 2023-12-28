@@ -4749,6 +4749,7 @@ dependencies = [
  "solana-rpc-client-api",
  "solana-sdk",
  "solana-storage-bigtable",
+ "solana-transaction-status",
  "tokio",
 ]
 

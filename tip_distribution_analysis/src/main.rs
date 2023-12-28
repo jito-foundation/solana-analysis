@@ -1,4 +1,4 @@
-use anchor_lang::Discriminator;
+use anchor_lang::{AnchorDeserialize, Discriminator};
 use clap::Parser;
 use jito_tip_distribution::state::ClaimStatus;
 use log::info;
@@ -6,6 +6,7 @@ use solana_account_decoder::UiAccountEncoding;
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
 use solana_rpc_client_api::config::{RpcAccountInfoConfig, RpcProgramAccountsConfig};
 use solana_rpc_client_api::filter::{Memcmp, MemcmpEncodedBytes, RpcFilterType};
+use solana_sdk::clock::Epoch;
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::stake;
 use solana_sdk::stake::state::StakeState;
@@ -64,9 +65,7 @@ async fn print_stake_account_info(rpc_client: &RpcClient) {
         .get_program_accounts_with_config(
             &stake::program::id(),
             RpcProgramAccountsConfig {
-                filters: Some(vec![RpcFilterType::DataSize(
-                    stake::state::StakeState::size_of() as u64,
-                )]),
+                filters: Some(vec![RpcFilterType::DataSize(StakeState::size_of() as u64)]),
                 account_config: RpcAccountInfoConfig {
                     encoding: Some(UiAccountEncoding::Base64),
                     ..RpcAccountInfoConfig::default()
@@ -90,20 +89,35 @@ async fn print_stake_account_info(rpc_client: &RpcClient) {
         min_rent_amount
     );
 
-    // let excess_staked_accounts: Vec<_> = stake_accounts
-    //     .iter()
-    //     .filter_map(|(pubkey, stake_account)| {
-    //         let state = StakeState::deserialize(&mut stake_account.data.as_slice()).ok()?;
-    //         let delegation = state.delegation()?;
-    //         let excess = stake_account.lamports - delegation.stake - min_rent_amount;
-    //         info!(
-    //             "{}: delegation stake: {:?}, lamports: {}, rent: {}, excess: {}",
-    //             pubkey, delegation.stake, stake_account.lamports, min_rent_amount, excess
-    //         );
-    //
-    //         Some((pubkey, excess))
-    //     })
-    //     .collect();
+    let mut excess_staked_accounts: Vec<_> = stake_accounts
+        .iter()
+        .filter_map(|(pubkey, stake_account)| {
+            let state = StakeState::deserialize(&mut stake_account.data.as_slice()).ok()?;
+            let delegation = state.delegation()?;
+
+            if delegation.deactivation_epoch != Epoch::MAX {
+                return None;
+            }
+
+            let excess_lamports_without_rent = stake_account
+                .lamports
+                .checked_sub(delegation.stake)
+                .unwrap();
+
+            let excess = excess_lamports_without_rent
+                .checked_sub(min_rent_amount)
+                .unwrap();
+
+            Some((pubkey, excess))
+        })
+        .collect();
+
+    excess_staked_accounts.sort_by_key(|(_, excess)| *excess);
+    excess_staked_accounts.reverse();
+
+    for (pubkey, sol) in excess_staked_accounts {
+        info!("{}: {}", pubkey, sol as f64 / LAMPORTS_PER_SOL as f64);
+    }
 }
 
 #[tokio::main]
@@ -114,16 +128,35 @@ async fn main() {
 
     let rpc_client = RpcClient::new_with_timeout(args.rpc_url, Duration::from_secs(600));
 
-    print_transaction_fees().await;
-
-    print_claim_status_info(&rpc_client).await;
-
     print_stake_account_info(&rpc_client).await;
+    print_claim_status_info(&rpc_client).await;
 }
 
-async fn print_transaction_fees() {
-    // let pubkey = Pubkey::from_str("GZctHpWXmsZC1YHACTGGcHhYxjdRqQvTpYkb9LMvxDib").unwrap();
-    // let ledger_storage = LedgerStorage::new(true, None, None).await.unwrap();
-
-    // go through GZctHpWXmsZC1YHACTGGcHhYxjdRqQvTpYkb9LMvxDib, summing up transaction fees paid
-}
+// async fn find_transactions_by_address_until(
+//     pubkey: &Pubkey,
+//     slot: u64,
+// ) -> Vec<(ConfirmedTransactionStatusWithSignature, u32)> {
+//     let mut transactions = Vec::new();
+//
+//     let ledger_tool = LedgerStorage::new(true, None, None).await.unwrap();
+//     let mut before_sig = None;
+//
+//     while let Ok(confirmed_txs) = ledger_tool
+//         .get_confirmed_signatures_for_address(&pubkey, before_sig.as_ref(), None, 50_000)
+//         .await
+//     {
+//         if confirmed_txs.is_empty() {
+//             break;
+//         }
+//         before_sig = Some(confirmed_txs.last().unwrap().0.signature);
+//         let lowest_slot = confirmed_txs.last().unwrap().0.slot;
+//
+//         transactions.extend(confirmed_txs);
+//         println!("slot: {} num_txs: {}", lowest_slot, transactions.len());
+//
+//         if lowest_slot <= slot {
+//             break;
+//         }
+//     }
+//     transactions
+// }

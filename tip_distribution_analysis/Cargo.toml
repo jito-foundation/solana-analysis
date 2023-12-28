@@ -15,3 +15,4 @@ solana-rpc-client-api = { workspace = true }
 solana-sdk = { workspace = true }
 solana-storage-bigtable = { workspace = true }
 tokio = { workspace = true }
+solana-transaction-status = { workspace = true }

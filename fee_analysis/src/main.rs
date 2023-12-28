@@ -15,7 +15,6 @@ use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::time::Duration;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::time::sleep;
 
 #[derive(Parser)]
 struct Args {
