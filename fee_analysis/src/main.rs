@@ -1,9 +1,11 @@
 use anchor_lang::solana_program::clock::Slot;
 use clap::Parser;
+use csv::Writer;
 use futures::future::join_all;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::warn;
+use serde::{Deserialize, Serialize};
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::reward_type::RewardType;
@@ -12,8 +14,9 @@ use solana_sdk::vote;
 use solana_storage_bigtable::LedgerStorage;
 use solana_transaction_status::ConfirmedBlock;
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
 #[derive(Parser)]
@@ -27,7 +30,7 @@ struct Args {
     end_slot: u64,
 
     /// End slot
-    #[arg(short, long, default_value_t = num_cpus::get() * 2)]
+    #[arg(short, long, default_value_t = num_cpus::get() * 3)]
     num_cpus: usize,
 }
 
@@ -39,6 +42,14 @@ struct BlockFeeStats {
     vote_fees_sol: f64,
     non_vote_fees_sol: f64,
     jito_tips_sol: f64,
+
+    non_vote_success_txs: usize,
+    non_vote_failure_txs: usize,
+    vote_success_txs: usize,
+    vote_failures_txs: usize,
+
+    non_vote_success_compute: u64,
+    non_vote_failure_compute: u64,
 }
 
 #[tokio::main]
@@ -55,7 +66,19 @@ async fn main() {
         let sender = sender.clone();
         tokio::spawn(query_slot_fee_stats(sender, slots))
     });
-    let receive_loop = tokio::spawn(aggregate_slot_fee_stats(receiver));
+
+    let csv = csv::WriterBuilder::new()
+        .from_path(format!(
+            "{}_{}_{}_stats.csv",
+            args.start_slot,
+            args.end_slot,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ))
+        .unwrap();
+    let receive_loop = tokio::spawn(aggregate_slot_fee_stats(receiver, csv));
 
     join_all(futs).await;
 
@@ -129,10 +152,21 @@ fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats
         .map(|r| Pubkey::from_str(&r.pubkey))?
         .ok()?;
 
-    let non_vote_fees: u64 = block
+    // Non-vote transactions
+
+    let non_vote_txs = block
         .transactions
         .iter()
-        .filter(|tx| !is_simple_vote_transaction(&tx.get_transaction()))
+        .filter(|tx| !is_simple_vote_transaction(&tx.get_transaction()));
+    let non_vote_success_txs = non_vote_txs
+        .clone()
+        .filter(|tx| tx.get_status_meta().unwrap().status.is_ok());
+    let non_vote_failure_txs = non_vote_txs
+        .clone()
+        .filter(|tx| tx.get_status_meta().unwrap().status.is_err());
+
+    let non_vote_fees: u64 = non_vote_txs
+        .clone()
         .filter_map(|tx| {
             let status = tx.get_status_meta()?;
             Some(status.fee)
@@ -140,16 +174,43 @@ fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats
         .sum();
     let non_vote_fees_sol = non_vote_fees as f64 / LAMPORTS_PER_SOL as f64;
 
-    let vote_fees: u64 = block
+    let non_vote_success_compute_units = non_vote_success_txs
+        .clone()
+        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
+        .sum();
+
+    let non_vote_failed_compute_units = non_vote_failure_txs
+        .clone()
+        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
+        .sum();
+
+    let non_vote_success_tx_count = non_vote_success_txs.count();
+    let non_vote_failure_tx_count = non_vote_failure_txs.count();
+
+    // Vote transactions
+
+    let vote_txs = block
         .transactions
         .iter()
-        .filter(|tx| is_simple_vote_transaction(&tx.get_transaction()))
+        .filter(|tx| is_simple_vote_transaction(&tx.get_transaction()));
+    let vote_success_txs = vote_txs
+        .clone()
+        .filter(|tx| tx.get_status_meta().unwrap().status.is_ok());
+    let vote_failure_txs = vote_txs
+        .clone()
+        .filter(|tx| tx.get_status_meta().unwrap().status.is_err());
+
+    let vote_fees: u64 = vote_txs
+        .clone()
         .filter_map(|tx| {
             let status = tx.get_status_meta()?;
             Some(status.fee)
         })
         .sum();
     let vote_fees_sol = vote_fees as f64 / LAMPORTS_PER_SOL as f64;
+
+    let vote_success_tx_count = vote_success_txs.count();
+    let vote_failure_tx_count = vote_failure_txs.count();
 
     let mut jito_tips = 0;
     for tx in &block.transactions {
@@ -173,19 +234,31 @@ fn parse_block_fees(slot: &Slot, block: &ConfirmedBlock) -> Option<BlockFeeStats
         non_vote_fees_sol: non_vote_fees_sol / 2.0,
         vote_fees_sol: vote_fees_sol / 2.0,
         jito_tips_sol,
+        non_vote_success_txs: non_vote_success_tx_count,
+        non_vote_failure_txs: non_vote_failure_tx_count,
+        vote_success_txs: vote_success_tx_count,
+        vote_failures_txs: vote_failure_tx_count,
+        non_vote_success_compute: non_vote_success_compute_units,
+        non_vote_failure_compute: non_vote_failed_compute_units,
     })
 }
 
-#[derive(Debug, Clone)]
-struct AggregatedFeeStats {
+#[derive(Deserialize, Serialize, Debug, Clone)]
+struct AggregatedStats {
+    leader: String,
     num_blocks: u64,
     non_vote_fees_sol: f64,
     vote_fees_sol: f64,
     jito_tips_sol: f64,
+
+    non_vote_success_txs: usize,
+    non_vote_failure_txs: usize,
+    non_vote_success_compute: u64,
+    non_vote_failure_compute: u64,
 }
 
-async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
-    let mut aggregated_stats: HashMap<Pubkey, AggregatedFeeStats> = HashMap::default();
+async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>, mut csv: Writer<File>) {
+    let mut aggregated_stats: HashMap<Pubkey, AggregatedStats> = HashMap::default();
 
     let mut count = 0;
 
@@ -197,12 +270,21 @@ async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
                 s.non_vote_fees_sol += stats.non_vote_fees_sol;
                 s.vote_fees_sol += stats.vote_fees_sol;
                 s.jito_tips_sol += stats.jito_tips_sol;
+                s.non_vote_success_txs += stats.non_vote_success_txs;
+                s.non_vote_failure_txs += stats.non_vote_failure_txs;
+                s.non_vote_success_compute += stats.non_vote_success_compute;
+                s.non_vote_failure_compute += stats.non_vote_failure_compute;
             })
-            .or_insert(AggregatedFeeStats {
+            .or_insert(AggregatedStats {
+                leader: stats.leader.to_string(),
                 num_blocks: 1,
                 non_vote_fees_sol: stats.non_vote_fees_sol,
                 vote_fees_sol: stats.vote_fees_sol,
                 jito_tips_sol: stats.jito_tips_sol,
+                non_vote_success_txs: stats.non_vote_success_txs,
+                non_vote_failure_txs: stats.non_vote_failure_txs,
+                non_vote_success_compute: stats.non_vote_success_compute,
+                non_vote_failure_compute: stats.non_vote_failure_compute,
             });
 
         count += 1;
@@ -210,15 +292,8 @@ async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
     }
 
     // poor mans csv
-    println!("leader,num_blocks,non_vote_fees_sol,vote_fees_sol,jito_tips_sol");
-    for (leader, stats) in aggregated_stats {
-        println!(
-            "{},{},{},{},{}",
-            leader,
-            stats.num_blocks,
-            stats.non_vote_fees_sol,
-            stats.vote_fees_sol,
-            stats.jito_tips_sol
-        );
+    for (_, stats) in aggregated_stats {
+        csv.serialize(stats).unwrap();
     }
+    csv.flush().unwrap();
 }

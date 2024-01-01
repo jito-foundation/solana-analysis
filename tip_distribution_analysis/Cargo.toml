@@ -16,3 +16,4 @@ solana-sdk = { workspace = true }
 solana-storage-bigtable = { workspace = true }
 tokio = { workspace = true }
 solana-transaction-status = { workspace = true }
+serde = { workspace = true }
