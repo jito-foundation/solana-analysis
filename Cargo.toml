@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "fee_analysis",
-    "tip_distribution_analysis"
+    "tip_distribution_analysis",
+    "jan_10_arb_analysis",
 ]
 
 [workspace.package]
