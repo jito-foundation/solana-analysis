@@ -4,7 +4,6 @@ use futures::future::join_all;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{info, warn};
-use serde::{Deserialize, Serialize};
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::reward_type::RewardType;
@@ -52,7 +51,11 @@ struct BlockFeeStats {
     non_vote_success_compute: u64,
     non_vote_failure_compute: u64,
 
-    transactions_with_token_mint: Vec<TransactionWithStatusMeta>,
+    successful_txs_with_mint_cus: u64,
+    failed_txs_with_mint_cus: u64,
+
+    success_txs_with_mint: Vec<TransactionWithStatusMeta>,
+    failed_txs_with_mint: Vec<TransactionWithStatusMeta>,
 }
 
 #[tokio::main]
@@ -68,10 +71,10 @@ async fn main() {
     let futs = slot_chunks.into_iter().map(|slots| {
         let slots = slots.to_vec();
         let sender = sender.clone();
-        tokio::spawn(query_slot_fee_stats(sender, slots, args.token_mint.clone()))
+        tokio::spawn(query_slot_fee_stats(sender, slots))
     });
 
-    let receive_loop = tokio::spawn(aggregate_slot_fee_stats(receiver));
+    let receive_loop = tokio::spawn(examine_token_mint(receiver, args.token_mint));
 
     join_all(futs).await;
 
@@ -79,7 +82,7 @@ async fn main() {
     let _ = receive_loop.await;
 }
 
-async fn query_slot_fee_stats(sender: Sender<BlockFeeStats>, slots: Vec<u64>, token_mint: String) {
+async fn query_slot_fee_stats(sender: Sender<(Slot, ConfirmedBlock)>, slots: Vec<u64>) {
     let ledger_tool = loop {
         match LedgerStorage::new(true, None, None).await {
             Ok(l) => {
@@ -98,9 +101,7 @@ async fn query_slot_fee_stats(sender: Sender<BlockFeeStats>, slots: Vec<u64>, to
         {
             Ok(slots_blocks) => {
                 for (slot, block) in slots_blocks {
-                    if let Some(fee_stats) = parse_block_fees(&slot, &block, &token_mint) {
-                        let _ = sender.send(fee_stats).await;
-                    }
+                    let _ = sender.send((slot, block)).await;
                 }
             }
             Err(e) => {
@@ -137,20 +138,19 @@ lazy_static! {
     ]);
 }
 
-fn parse_block_fees(
-    slot: &Slot,
-    block: &ConfirmedBlock,
-    token_mint: &String,
-) -> Option<BlockFeeStats> {
-    let leader = block
+fn get_leader(block: &ConfirmedBlock) -> Option<Pubkey> {
+    block
         .rewards
         .iter()
         .find(|r| r.reward_type == Some(RewardType::Fee))
         .map(|r| Pubkey::from_str(&r.pubkey))?
-        .ok()?;
+        .ok()
+}
+
+fn parse_block(slot: &Slot, block: &ConfirmedBlock, token_mint: &String) -> Option<BlockFeeStats> {
+    let leader = get_leader(block)?;
 
     // Non-vote transactions
-
     let non_vote_txs = block
         .transactions
         .iter()
@@ -177,6 +177,18 @@ fn parse_block_fees(
         .sum();
 
     let non_vote_failed_compute_units = non_vote_failure_txs
+        .clone()
+        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
+        .sum();
+
+    let successful_txs_with_mint = filter_txs_with_mint(non_vote_success_txs.clone(), token_mint);
+    let successful_txs_with_mint_cus: u64 = successful_txs_with_mint
+        .clone()
+        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
+        .sum();
+
+    let failed_txs_with_mint = filter_txs_with_mint(non_vote_failure_txs.clone(), token_mint);
+    let failed_txs_with_mint_cus: u64 = failed_txs_with_mint
         .clone()
         .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
         .sum();
@@ -210,7 +222,6 @@ fn parse_block_fees(
     let vote_failure_tx_count = vote_failure_txs.count();
 
     let jito_tips_sol = find_jito_tips(&block.transactions);
-    let transactions_with_token_mint = find_txs_with_mint(&block.transactions, token_mint);
 
     // divide by 2 for burned fees
     Some(BlockFeeStats {
@@ -226,33 +237,33 @@ fn parse_block_fees(
         vote_failures_txs: vote_failure_tx_count,
         non_vote_success_compute: non_vote_success_compute_units,
         non_vote_failure_compute: non_vote_failed_compute_units,
-        transactions_with_token_mint,
+        successful_txs_with_mint_cus,
+        failed_txs_with_mint_cus,
+        success_txs_with_mint: successful_txs_with_mint.cloned().collect(),
+        failed_txs_with_mint: failed_txs_with_mint.cloned().collect(),
     })
 }
 
-fn find_txs_with_mint(
-    transactions: &[TransactionWithStatusMeta],
-    mint: &String,
-) -> Vec<TransactionWithStatusMeta> {
-    transactions
-        .iter()
-        .filter_map(|tx| {
-            let status_meta = tx.get_status_meta()?;
-            if status_meta
-                .pre_token_balances?
+fn filter_txs_with_mint<'a>(
+    transactions: impl Iterator<Item = &'a TransactionWithStatusMeta> + 'a + Clone,
+    mint: &'a String,
+) -> impl Iterator<Item = &'a TransactionWithStatusMeta> + 'a + Clone {
+    transactions.filter_map(|tx| {
+        let status_meta = tx.get_status_meta()?;
+        if status_meta
+            .pre_token_balances?
+            .iter()
+            .any(|balance| balance.mint == *mint)
+            || status_meta
+                .post_token_balances?
                 .iter()
                 .any(|balance| balance.mint == *mint)
-                || status_meta
-                    .post_token_balances?
-                    .iter()
-                    .any(|balance| balance.mint == *mint)
-            {
-                Some(tx.clone())
-            } else {
-                None
-            }
-        })
-        .collect()
+        {
+            Some(tx)
+        } else {
+            None
+        }
+    })
 }
 
 fn find_jito_tips(transactions: &[TransactionWithStatusMeta]) -> f64 {
@@ -271,57 +282,90 @@ fn find_jito_tips(transactions: &[TransactionWithStatusMeta]) -> f64 {
     jito_tips as f64 / LAMPORTS_PER_SOL as f64
 }
 
-#[derive(Deserialize, Serialize, Debug, Clone)]
-struct AggregatedStats {
-    leader: String,
-    num_blocks: u64,
-    non_vote_fees_sol: f64,
-    vote_fees_sol: f64,
-    jito_tips_sol: f64,
-
-    non_vote_success_txs: usize,
-    non_vote_failure_txs: usize,
-    non_vote_success_compute: u64,
-    non_vote_failure_compute: u64,
-}
-
-async fn aggregate_slot_fee_stats(mut receiver: Receiver<BlockFeeStats>) {
+async fn examine_token_mint(mut receiver: Receiver<(Slot, ConfirmedBlock)>, token_mint: String) {
     let mut blocks = BTreeMap::default();
 
     let mut count = 0;
-    while let Some(stats) = receiver.recv().await {
-        blocks.insert(stats.slot, stats);
+    while let Some((slot, block)) = receiver.recv().await {
+        blocks.insert(slot, block);
         count += 1;
         println!("received {} blocks", count);
     }
 
-    for (slot, stats) in blocks {
+    let slots_parsed: Vec<_> = blocks
+        .iter()
+        .filter_map(|(slot, block)| Some((slot, parse_block(slot, block, &token_mint)?)))
+        .collect();
+
+    for (slot, stats) in &slots_parsed {
         info!("slot: {:?}", slot);
+
         info!("leader: {:?}", stats.leader);
+
         info!("vote_fees_sol: {:?}", stats.vote_fees_sol);
         info!("non_vote_fees_sol: {:?}", stats.non_vote_fees_sol);
         info!("jito_tips_sol: {:?}", stats.jito_tips_sol);
-        info!("jito_tips_sol: {:?}", stats.jito_tips_sol);
+
+        info!("non_vote_success_txs: {:?}", stats.non_vote_success_txs);
+        info!("non_vote_failure_txs: {:?}", stats.non_vote_failure_txs);
+
+        info!("vote_success_txs: {:?}", stats.vote_success_txs);
+        info!("vote_failures_txs: {:?}", stats.vote_failures_txs);
+
         info!(
-            "success compute units: {:?}",
+            "non_vote_success_compute: {:?}",
             stats.non_vote_success_compute
         );
-        info!("failed compute units: {:?}", stats.non_vote_failure_compute);
-
         info!(
-            "filtered txs: {:?}",
-            stats.transactions_with_token_mint.len()
+            "non_vote_failure_compute: {:?}",
+            stats.non_vote_failure_compute
         );
 
-        let filtered_tx_cus: u64 = stats
-            .transactions_with_token_mint
-            .iter()
-            .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
-            .sum();
-        info!("filtered tx compute units: {:?}", filtered_tx_cus);
-        for tx in stats.transactions_with_token_mint {
-            info!("https://solscan.io/tx/{}", tx.transaction_signature());
+        info!(
+            "successful_txs_with_mint_cus: {:?}",
+            stats.successful_txs_with_mint_cus
+        );
+        info!(
+            "failed_txs_with_mint_cus: {:?}",
+            stats.failed_txs_with_mint_cus
+        );
+
+        info!(
+            "success_txs_with_mint: {:?}",
+            stats.success_txs_with_mint.len()
+        );
+        info!(
+            "failed_txs_with_mint: {:?}",
+            stats.failed_txs_with_mint.len()
+        );
+
+        for tx in &stats.success_txs_with_mint {
+            info!(
+                "success tx. signer: {}, tx: https://solscan.io/tx/{}",
+                tx.account_keys()[0],
+                tx.transaction_signature()
+            );
         }
+
+        for tx in &stats.failed_txs_with_mint {
+            info!(
+                "failed tx. signer: {}, tx: https://solscan.io/tx/{}",
+                tx.account_keys()[0],
+                tx.transaction_signature()
+            );
+        }
+        info!("================================");
         info!("");
     }
+
+    let jito_tips: f64 = slots_parsed
+        .iter()
+        .map(|(slot, stats)| stats.jito_tips_sol)
+        .sum();
+    let non_vote_fees: f64 = slots_parsed
+        .iter()
+        .map(|(slot, stats)| stats.non_vote_fees_sol)
+        .sum();
+    info!("total jito tips: {:?}", jito_tips);
+    info!("non vote fees: {:?}", non_vote_fees);
 }
