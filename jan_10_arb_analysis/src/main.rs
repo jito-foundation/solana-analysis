@@ -299,6 +299,7 @@ async fn examine_token_mint(mut receiver: Receiver<(Slot, ConfirmedBlock)>, toke
 
     for (slot, stats) in &slots_parsed {
         info!("slot: {:?}", slot);
+        info!("stamp: {:?}", stats.block_time);
 
         info!("leader: {:?}", stats.leader);
 
@@ -366,6 +367,25 @@ async fn examine_token_mint(mut receiver: Receiver<(Slot, ConfirmedBlock)>, toke
         .iter()
         .map(|(slot, stats)| stats.non_vote_fees_sol)
         .sum();
+
+    let total_token_cus: u64 = slots_parsed
+        .iter()
+        .map(|(slot, stats)| stats.failed_txs_with_mint_cus + stats.successful_txs_with_mint_cus)
+        .sum();
+
+    let total_token_failed_cus: u64 = slots_parsed
+        .iter()
+        .map(|(slot, stats)| stats.failed_txs_with_mint_cus)
+        .sum();
+
+    let total_non_vote_cus: u64 = slots_parsed
+        .iter()
+        .map(|(slot, stats)| stats.non_vote_failure_compute + stats.non_vote_success_compute)
+        .sum();
+
     info!("total jito tips: {:?}", jito_tips);
     info!("non vote fees: {:?}", non_vote_fees);
+    info!("total_token_cus: {:?}", total_token_cus);
+    info!("total_token_failed_cus: {:?}", total_token_failed_cus);
+    info!("total_non_vote_cus: {:?}", total_non_vote_cus);
 }
