@@ -11,7 +11,7 @@ use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::vote;
 use solana_storage_bigtable::LedgerStorage;
 use solana_transaction_status::{ConfirmedBlock, TransactionWithStatusMeta};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
@@ -383,9 +383,24 @@ async fn examine_token_mint(mut receiver: Receiver<(Slot, ConfirmedBlock)>, toke
         .map(|(slot, stats)| stats.non_vote_failure_compute + stats.non_vote_success_compute)
         .sum();
 
+    let validators_mev_earnings =
+        slots_parsed
+            .iter()
+            .fold(HashMap::new(), |mut hmap, (slot, stats)| {
+                hmap.entry(stats.leader)
+                    .and_modify(|e| *e += stats.jito_tips_sol)
+                    .or_insert(stats.jito_tips_sol);
+                hmap
+            });
+    let mut validator_tips: Vec<_> = validators_mev_earnings.into_iter().collect();
+    validator_tips.sort_by(|a, b| b.1.total_cmp(&a.1));
+
     info!("total jito tips: {:?}", jito_tips);
     info!("non vote fees: {:?}", non_vote_fees);
     info!("total_token_cus: {:?}", total_token_cus);
     info!("total_token_failed_cus: {:?}", total_token_failed_cus);
     info!("total_non_vote_cus: {:?}", total_non_vote_cus);
+    for (pubkey, tips) in validator_tips {
+        info!("validator mev tips: pubkey: {:?} tips {:?}", pubkey, tips);
+    }
 }
