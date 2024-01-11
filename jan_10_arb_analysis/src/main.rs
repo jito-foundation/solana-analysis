@@ -1,9 +1,11 @@
 use anchor_lang::solana_program::clock::Slot;
 use clap::Parser;
+use csv::Writer;
 use futures::future::join_all;
 use itertools::Itertools;
 use lazy_static::lazy_static;
 use log::{info, warn};
+use serde::{Deserialize, Serialize};
 use solana_sdk::native_token::LAMPORTS_PER_SOL;
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::reward_type::RewardType;
@@ -11,9 +13,24 @@ use solana_sdk::transaction::VersionedTransaction;
 use solana_sdk::vote;
 use solana_storage_bigtable::LedgerStorage;
 use solana_transaction_status::{ConfirmedBlock, TransactionWithStatusMeta};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
+use std::fs::File;
 use std::str::FromStr;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+
+lazy_static! {
+    static ref TIP_ACCOUNTS: HashSet<Pubkey> = HashSet::from_iter([
+        Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5").unwrap(),
+        Pubkey::from_str("HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe").unwrap(),
+        Pubkey::from_str("Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY").unwrap(),
+        Pubkey::from_str("ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49").unwrap(),
+        Pubkey::from_str("DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh").unwrap(),
+        Pubkey::from_str("ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt").unwrap(),
+        Pubkey::from_str("DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL").unwrap(),
+        Pubkey::from_str("3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT").unwrap(),
+    ]);
+}
 
 #[derive(Parser)]
 struct Args {
@@ -34,30 +51,6 @@ struct Args {
     token_mint: String,
 }
 
-#[derive(Debug, Clone)]
-struct BlockFeeStats {
-    leader: Pubkey,
-    block_time: i64,
-    slot: u64,
-    vote_fees_sol: f64,
-    non_vote_fees_sol: f64,
-    jito_tips_sol: f64,
-
-    non_vote_success_txs: usize,
-    non_vote_failure_txs: usize,
-    vote_success_txs: usize,
-    vote_failures_txs: usize,
-
-    non_vote_success_compute: u64,
-    non_vote_failure_compute: u64,
-
-    successful_txs_with_mint_cus: u64,
-    failed_txs_with_mint_cus: u64,
-
-    success_txs_with_mint: Vec<TransactionWithStatusMeta>,
-    failed_txs_with_mint: Vec<TransactionWithStatusMeta>,
-}
-
 #[tokio::main]
 async fn main() {
     let args: Args = Args::parse();
@@ -65,16 +58,50 @@ async fn main() {
 
     let slots: Vec<_> = (args.start_slot..args.end_slot).collect_vec();
     let slot_chunks = slots.chunks(slots.len() / args.num_cpus).collect_vec();
-    println!("num slot_chunks: {:?}", slot_chunks.len());
+    info!(
+        "querying {} slots using {} slot_chunks",
+        slots.len(),
+        slot_chunks.len()
+    );
+
+    let mint_tx_csv = csv::WriterBuilder::new()
+        .from_path(format!(
+            "{}_{}_{}_{}_stats.csv",
+            args.start_slot,
+            args.end_slot,
+            args.token_mint,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ))
+        .unwrap();
+
+    let block_stats_csv = csv::WriterBuilder::new()
+        .from_path(format!(
+            "{}_{}_{}_block_stats.csv",
+            args.start_slot,
+            args.end_slot,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        ))
+        .unwrap();
 
     let (sender, receiver) = channel(10_000);
     let futs = slot_chunks.into_iter().map(|slots| {
         let slots = slots.to_vec();
         let sender = sender.clone();
-        tokio::spawn(query_slot_fee_stats(sender, slots))
+        tokio::spawn(read_slots(sender, slots))
     });
 
-    let receive_loop = tokio::spawn(examine_token_mint(receiver, args.token_mint));
+    let receive_loop = tokio::spawn(gather_and_emit_stats(
+        receiver,
+        args.token_mint,
+        mint_tx_csv,
+        block_stats_csv,
+    ));
 
     join_all(futs).await;
 
@@ -82,7 +109,7 @@ async fn main() {
     let _ = receive_loop.await;
 }
 
-async fn query_slot_fee_stats(sender: Sender<(Slot, ConfirmedBlock)>, slots: Vec<u64>) {
+async fn read_slots(sender: Sender<(Slot, ConfirmedBlock)>, slots: Vec<u64>) {
     let ledger_tool = loop {
         match LedgerStorage::new(true, None, None).await {
             Ok(l) => {
@@ -125,19 +152,6 @@ fn is_simple_vote_transaction(tx: &VersionedTransaction) -> bool {
     }
 }
 
-lazy_static! {
-    static ref TIP_ACCOUNTS: HashSet<Pubkey> = HashSet::from_iter([
-        Pubkey::from_str("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5").unwrap(),
-        Pubkey::from_str("HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe").unwrap(),
-        Pubkey::from_str("Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY").unwrap(),
-        Pubkey::from_str("ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49").unwrap(),
-        Pubkey::from_str("DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh").unwrap(),
-        Pubkey::from_str("ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt").unwrap(),
-        Pubkey::from_str("DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL").unwrap(),
-        Pubkey::from_str("3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT").unwrap(),
-    ]);
-}
-
 fn get_leader(block: &ConfirmedBlock) -> Option<Pubkey> {
     block
         .rewards
@@ -147,142 +161,63 @@ fn get_leader(block: &ConfirmedBlock) -> Option<Pubkey> {
         .ok()
 }
 
-fn parse_block(slot: &Slot, block: &ConfirmedBlock, token_mint: &String) -> Option<BlockFeeStats> {
-    let leader = get_leader(block)?;
+fn calculate_jito_tips(tx: &TransactionWithStatusMeta) -> u64 {
+    let pre_tx_balances = tx.get_status_meta().unwrap().pre_balances;
+    let post_tx_balances = tx.get_status_meta().unwrap().post_balances;
 
-    // Non-vote transactions
-    let non_vote_txs = block
-        .transactions
-        .iter()
-        .filter(|tx| !is_simple_vote_transaction(&tx.get_transaction()));
-    let non_vote_success_txs = non_vote_txs
-        .clone()
-        .filter(|tx| tx.get_status_meta().unwrap().status.is_ok());
-    let non_vote_failure_txs = non_vote_txs
-        .clone()
-        .filter(|tx| tx.get_status_meta().unwrap().status.is_err());
-
-    let non_vote_fees: u64 = non_vote_txs
-        .clone()
-        .filter_map(|tx| {
-            let status = tx.get_status_meta()?;
-            Some(status.fee)
-        })
-        .sum();
-    let non_vote_fees_sol = non_vote_fees as f64 / LAMPORTS_PER_SOL as f64;
-
-    let non_vote_success_compute_units = non_vote_success_txs
-        .clone()
-        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
-        .sum();
-
-    let non_vote_failed_compute_units = non_vote_failure_txs
-        .clone()
-        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
-        .sum();
-
-    let successful_txs_with_mint = filter_txs_with_mint(non_vote_success_txs.clone(), token_mint);
-    let successful_txs_with_mint_cus: u64 = successful_txs_with_mint
-        .clone()
-        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
-        .sum();
-
-    let failed_txs_with_mint = filter_txs_with_mint(non_vote_failure_txs.clone(), token_mint);
-    let failed_txs_with_mint_cus: u64 = failed_txs_with_mint
-        .clone()
-        .filter_map(|tx| tx.get_status_meta()?.compute_units_consumed)
-        .sum();
-
-    let non_vote_success_tx_count = non_vote_success_txs.count();
-    let non_vote_failure_tx_count = non_vote_failure_txs.count();
-
-    // Vote transactions
-
-    let vote_txs = block
-        .transactions
-        .iter()
-        .filter(|tx| is_simple_vote_transaction(&tx.get_transaction()));
-    let vote_success_txs = vote_txs
-        .clone()
-        .filter(|tx| tx.get_status_meta().unwrap().status.is_ok());
-    let vote_failure_txs = vote_txs
-        .clone()
-        .filter(|tx| tx.get_status_meta().unwrap().status.is_err());
-
-    let vote_fees: u64 = vote_txs
-        .clone()
-        .filter_map(|tx| {
-            let status = tx.get_status_meta()?;
-            Some(status.fee)
-        })
-        .sum();
-    let vote_fees_sol = vote_fees as f64 / LAMPORTS_PER_SOL as f64;
-
-    let vote_success_tx_count = vote_success_txs.count();
-    let vote_failure_tx_count = vote_failure_txs.count();
-
-    let jito_tips_sol = find_jito_tips(&block.transactions);
-
-    // divide by 2 for burned fees
-    Some(BlockFeeStats {
-        leader,
-        block_time: block.block_time.unwrap(),
-        slot: *slot,
-        non_vote_fees_sol: non_vote_fees_sol / 2.0,
-        vote_fees_sol: vote_fees_sol / 2.0,
-        jito_tips_sol,
-        non_vote_success_txs: non_vote_success_tx_count,
-        non_vote_failure_txs: non_vote_failure_tx_count,
-        vote_success_txs: vote_success_tx_count,
-        vote_failures_txs: vote_failure_tx_count,
-        non_vote_success_compute: non_vote_success_compute_units,
-        non_vote_failure_compute: non_vote_failed_compute_units,
-        successful_txs_with_mint_cus,
-        failed_txs_with_mint_cus,
-        success_txs_with_mint: successful_txs_with_mint.cloned().collect(),
-        failed_txs_with_mint: failed_txs_with_mint.cloned().collect(),
-    })
-}
-
-fn filter_txs_with_mint<'a>(
-    transactions: impl Iterator<Item = &'a TransactionWithStatusMeta> + 'a + Clone,
-    mint: &'a String,
-) -> impl Iterator<Item = &'a TransactionWithStatusMeta> + 'a + Clone {
-    transactions.filter_map(|tx| {
-        let status_meta = tx.get_status_meta()?;
-        if status_meta
-            .pre_token_balances?
-            .iter()
-            .any(|balance| balance.mint == *mint)
-            || status_meta
-                .post_token_balances?
-                .iter()
-                .any(|balance| balance.mint == *mint)
-        {
-            Some(tx)
-        } else {
-            None
-        }
-    })
-}
-
-fn find_jito_tips(transactions: &[TransactionWithStatusMeta]) -> f64 {
     let mut jito_tips = 0;
-    for tx in transactions {
-        let pre_tx_balances = tx.get_status_meta().unwrap().pre_balances;
-        let post_tx_balances = tx.get_status_meta().unwrap().post_balances;
-        for (idx, account) in tx.account_keys().iter().enumerate() {
-            if TIP_ACCOUNTS.contains(account) {
-                if post_tx_balances[idx] > pre_tx_balances[idx] {
-                    jito_tips += post_tx_balances[idx] - pre_tx_balances[idx];
-                }
+    for (idx, account) in tx.account_keys().iter().enumerate() {
+        if TIP_ACCOUNTS.contains(account) {
+            if post_tx_balances[idx] > pre_tx_balances[idx] {
+                jito_tips += post_tx_balances[idx] - pre_tx_balances[idx];
             }
         }
     }
-    jito_tips as f64 / LAMPORTS_PER_SOL as f64
+    jito_tips
 }
 
-async fn examine_token_mint(mut receiver: Receiver<(Slot, ConfirmedBlock)>, token_mint: String) {
+#[derive(Default, Serialize, Deserialize)]
+struct TransactionStats {
+    slot: u64,
+    block_time: i64,
+    index: u64,
+    leader: String,
+    signature: String,
+    signer: String,
+    is_success: bool,
+    compute_units: u64,
+    fees_paid: f64,
+    jito_tips: f64,
+    link: String,
+}
+
+#[derive(Default, Serialize, Deserialize)]
+struct BlockStats {
+    slot: u64,
+    block_time: i64,
+    leader: String,
+    fees_paid: f64,
+    jito_tips: f64,
+
+    total_ok_cus: u64,
+    total_fail_cus: u64,
+    total_cus: u64,
+
+    total_non_vote_ok_cus: u64,
+    total_non_vote_fail_cus: u64,
+    total_non_vote_cus: u64,
+
+    non_vote_txs: usize,
+    vote_txs: usize,
+    total_txs: usize,
+}
+
+async fn gather_and_emit_stats(
+    mut receiver: Receiver<(Slot, ConfirmedBlock)>,
+    token_mint: String,
+    mut mint_tx_csv: Writer<File>,
+    mut block_stats_csv: Writer<File>,
+) {
     let mut blocks = BTreeMap::default();
 
     let mut count = 0;
@@ -292,115 +227,148 @@ async fn examine_token_mint(mut receiver: Receiver<(Slot, ConfirmedBlock)>, toke
         println!("received {} blocks", count);
     }
 
-    let slots_parsed: Vec<_> = blocks
-        .iter()
-        .filter_map(|(slot, block)| Some((slot, parse_block(slot, block, &token_mint)?)))
-        .collect();
+    for (slot, block) in &blocks {
+        let leader = get_leader(block).unwrap().to_string();
 
-    for (slot, stats) in &slots_parsed {
-        info!("slot: {:?}", slot);
-        info!("stamp: {:?}", stats.block_time);
-
-        info!("leader: {:?}", stats.leader);
-
-        info!("vote_fees_sol: {:?}", stats.vote_fees_sol);
-        info!("non_vote_fees_sol: {:?}", stats.non_vote_fees_sol);
-        info!("jito_tips_sol: {:?}", stats.jito_tips_sol);
-
-        info!("non_vote_success_txs: {:?}", stats.non_vote_success_txs);
-        info!("non_vote_failure_txs: {:?}", stats.non_vote_failure_txs);
-
-        info!("vote_success_txs: {:?}", stats.vote_success_txs);
-        info!("vote_failures_txs: {:?}", stats.vote_failures_txs);
-
-        info!(
-            "non_vote_success_compute: {:?}",
-            stats.non_vote_success_compute
-        );
-        info!(
-            "non_vote_failure_compute: {:?}",
-            stats.non_vote_failure_compute
-        );
-
-        info!(
-            "successful_txs_with_mint_cus: {:?}",
-            stats.successful_txs_with_mint_cus
-        );
-        info!(
-            "failed_txs_with_mint_cus: {:?}",
-            stats.failed_txs_with_mint_cus
-        );
-
-        info!(
-            "success_txs_with_mint: {:?}",
-            stats.success_txs_with_mint.len()
-        );
-        info!(
-            "failed_txs_with_mint: {:?}",
-            stats.failed_txs_with_mint.len()
-        );
-
-        for tx in &stats.success_txs_with_mint {
-            info!(
-                "success tx. signer: {}, tx: https://solscan.io/tx/{}",
-                tx.account_keys()[0],
-                tx.transaction_signature()
-            );
-        }
-
-        for tx in &stats.failed_txs_with_mint {
-            info!(
-                "failed tx. signer: {}, tx: https://solscan.io/tx/{}",
-                tx.account_keys()[0],
-                tx.transaction_signature()
-            );
-        }
-        info!("================================");
-        info!("");
-    }
-
-    let jito_tips: f64 = slots_parsed
-        .iter()
-        .map(|(slot, stats)| stats.jito_tips_sol)
-        .sum();
-    let non_vote_fees: f64 = slots_parsed
-        .iter()
-        .map(|(slot, stats)| stats.non_vote_fees_sol)
-        .sum();
-
-    let total_token_cus: u64 = slots_parsed
-        .iter()
-        .map(|(slot, stats)| stats.failed_txs_with_mint_cus + stats.successful_txs_with_mint_cus)
-        .sum();
-
-    let total_token_failed_cus: u64 = slots_parsed
-        .iter()
-        .map(|(slot, stats)| stats.failed_txs_with_mint_cus)
-        .sum();
-
-    let total_non_vote_cus: u64 = slots_parsed
-        .iter()
-        .map(|(slot, stats)| stats.non_vote_failure_compute + stats.non_vote_success_compute)
-        .sum();
-
-    let validators_mev_earnings =
-        slots_parsed
+        let transactions_touching_token_mint: Vec<_> = block
+            .transactions
             .iter()
-            .fold(HashMap::new(), |mut hmap, (slot, stats)| {
-                hmap.entry(stats.leader)
-                    .and_modify(|e| *e += stats.jito_tips_sol)
-                    .or_insert(stats.jito_tips_sol);
-                hmap
-            });
-    let mut validator_tips: Vec<_> = validators_mev_earnings.into_iter().collect();
-    validator_tips.sort_by(|a, b| b.1.total_cmp(&a.1));
+            .enumerate()
+            .filter_map(|(idx, tx)| {
+                let status_meta = tx.get_status_meta()?;
+                if status_meta
+                    .pre_token_balances?
+                    .iter()
+                    .any(|balance| balance.mint == *token_mint)
+                    || status_meta
+                        .post_token_balances?
+                        .iter()
+                        .any(|balance| balance.mint == *token_mint)
+                {
+                    Some((idx, tx))
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-    info!("total jito tips: {:?}", jito_tips);
-    info!("non vote fees: {:?}", non_vote_fees);
-    info!("total_token_cus: {:?}", total_token_cus);
-    info!("total_token_failed_cus: {:?}", total_token_failed_cus);
-    info!("total_non_vote_cus: {:?}", total_non_vote_cus);
-    for (pubkey, tips) in validator_tips {
-        info!("validator mev tips: pubkey: {:?} tips {:?}", pubkey, tips);
+        let transaction_stats: Vec<_> = transactions_touching_token_mint
+            .iter()
+            .map(|(idx, tx)| {
+                let status_meta = tx.get_status_meta().unwrap();
+
+                TransactionStats {
+                    slot: *slot,
+                    block_time: block.block_time.unwrap(),
+                    index: *idx as u64,
+                    leader: leader.clone(),
+                    signature: tx.transaction_signature().to_string(),
+                    signer: tx.account_keys()[0].to_string(),
+                    is_success: status_meta.status.is_ok(),
+                    compute_units: status_meta.compute_units_consumed.unwrap(),
+                    fees_paid: status_meta.fee as f64 / LAMPORTS_PER_SOL as f64,
+                    jito_tips: calculate_jito_tips(tx) as f64 / LAMPORTS_PER_SOL as f64,
+                    link: format!("https://solscan.io/tx/{}", tx.transaction_signature()),
+                }
+            })
+            .collect();
+
+        for stat in transaction_stats {
+            mint_tx_csv.serialize(stat).unwrap();
+        }
+
+        let jito_tips = block
+            .transactions
+            .iter()
+            .map(calculate_jito_tips)
+            .sum::<u64>() as f64
+            / LAMPORTS_PER_SOL as f64;
+        let total_ok_cus: u64 = block
+            .transactions
+            .iter()
+            .filter(|tx| tx.get_status_meta().unwrap().status.is_ok())
+            .map(|tx| {
+                tx.get_status_meta()
+                    .unwrap()
+                    .compute_units_consumed
+                    .unwrap()
+            })
+            .sum();
+        let total_fail_cus: u64 = block
+            .transactions
+            .iter()
+            .filter(|tx| tx.get_status_meta().unwrap().status.is_err())
+            .map(|tx| {
+                tx.get_status_meta()
+                    .unwrap()
+                    .compute_units_consumed
+                    .unwrap()
+            })
+            .sum();
+
+        let total_non_vote_ok_cus: u64 = block
+            .transactions
+            .iter()
+            .filter(|tx| !is_simple_vote_transaction(&tx.get_transaction()))
+            .filter(|tx| tx.get_status_meta().unwrap().status.is_ok())
+            .map(|tx| {
+                tx.get_status_meta()
+                    .unwrap()
+                    .compute_units_consumed
+                    .unwrap()
+            })
+            .sum();
+        let total_non_vote_fail_cus: u64 = block
+            .transactions
+            .iter()
+            .filter(|tx| !is_simple_vote_transaction(&tx.get_transaction()))
+            .filter(|tx| tx.get_status_meta().unwrap().status.is_err())
+            .map(|tx| {
+                tx.get_status_meta()
+                    .unwrap()
+                    .compute_units_consumed
+                    .unwrap()
+            })
+            .sum();
+
+        let fees_paid = block
+            .transactions
+            .iter()
+            .map(|tx| tx.get_status_meta().unwrap().fee)
+            .sum::<u64>() as f64
+            / LAMPORTS_PER_SOL as f64;
+
+        let non_vote_txs = block
+            .transactions
+            .iter()
+            .filter(|tx| !is_simple_vote_transaction(&tx.get_transaction()))
+            .count();
+        let vote_txs = block
+            .transactions
+            .iter()
+            .filter(|tx| is_simple_vote_transaction(&tx.get_transaction()))
+            .count();
+
+        block_stats_csv
+            .serialize(BlockStats {
+                slot: *slot,
+                block_time: block.block_time.unwrap(),
+                leader,
+                fees_paid,
+                jito_tips,
+                total_ok_cus,
+                total_fail_cus,
+                total_cus: total_ok_cus + total_fail_cus,
+                total_non_vote_ok_cus,
+                total_non_vote_fail_cus,
+                total_non_vote_cus: total_non_vote_ok_cus + total_non_vote_fail_cus,
+                non_vote_txs,
+                vote_txs,
+                total_txs: non_vote_txs + vote_txs,
+            })
+            .unwrap();
     }
+
+    block_stats_csv.flush().unwrap();
+    mint_tx_csv.flush().unwrap();
 }

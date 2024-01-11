@@ -35,6 +35,7 @@ struct Args {
 }
 
 #[derive(Debug, Clone)]
+#[allow(unused)]
 struct BlockFeeStats {
     leader: Pubkey,
     block_time: i64,
