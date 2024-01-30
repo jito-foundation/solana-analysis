@@ -73,17 +73,17 @@ async fn main() -> anyhow::Result<()> {
                 transactions_write_locking_account.len()
             );
 
-            let mut compute_used_so_far = 0;
-
             println!(
                 "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
                 "idx", "fee", "sig", "signer", "success", "compute", "cus_so_far"
             );
+
+            let mut compute_used_so_far = 0;
             for (idx, tx) in transactions_write_locking_account {
                 let meta = tx.get_status_meta().unwrap();
 
                 println!(
-                    "{:<3} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
+                    "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
                     idx,
                     meta.fee,
                     &tx.transaction_signature().to_string()[..5],
