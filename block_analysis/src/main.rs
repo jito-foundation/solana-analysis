@@ -61,39 +61,55 @@ async fn main() -> anyhow::Result<()> {
     for (slot, block) in slots_blocks {
         let writable_keys_sorted = find_writable_keys_sorted(&block.transactions);
 
+        let mut total_cus: u64 = 0;
+        let cus_so_far: Vec<_> = block
+            .transactions
+            .iter()
+            .map(|tx| {
+                total_cus += tx
+                    .get_status_meta()
+                    .unwrap()
+                    .compute_units_consumed
+                    .unwrap_or_default();
+                total_cus
+            })
+            .collect();
+
         // take the top 5 write accounts per block and find the transaction details
         for (account_idx, (account, _)) in writable_keys_sorted.iter().enumerate().take(5) {
             let transactions_write_locking_account =
                 find_transactions_by_write_lock(&block.transactions, account);
             println!(
-                "slot: {} used_in_slot: {} account: {} transactions: {}",
+                "slot: {} used_in_slot: {} account: {} transactions: {}, block_cu: {}",
                 slot,
                 account_idx,
                 account,
-                transactions_write_locking_account.len()
+                transactions_write_locking_account.len(),
+                cus_so_far.last().unwrap()
             );
 
             println!(
-                "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
-                "idx", "fee", "sig", "signer", "success", "compute", "cus_so_far"
+                "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8} | {:<9}",
+                "idx", "fee", "sig", "signer", "success", "compute", "acc_cus", "block_cus"
             );
 
-            let mut compute_used_so_far = 0;
+            let mut account_cus = 0;
             for (idx, tx) in transactions_write_locking_account {
                 let meta = tx.get_status_meta().unwrap();
 
                 println!(
-                    "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
+                    "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8} | {:<9}",
                     idx,
                     meta.fee,
                     &tx.transaction_signature().to_string()[..5],
                     &tx.account_keys()[0].to_string()[..5],
                     meta.status.is_ok(),
                     meta.compute_units_consumed.unwrap_or_default(),
-                    compute_used_so_far,
+                    account_cus,
+                    cus_so_far[idx]
                 );
 
-                compute_used_so_far += meta.compute_units_consumed.unwrap_or_default();
+                account_cus += meta.compute_units_consumed.unwrap_or_default();
             }
 
             println!();
