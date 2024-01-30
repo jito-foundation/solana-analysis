@@ -78,13 +78,14 @@ async fn main() -> anyhow::Result<()> {
                 let meta = tx.get_status_meta().unwrap();
 
                 println!(
-                    "idx: {} fee: {} compute: {} compute_used_so_far: {} signature: {} signer: {}",
+                    "idx: {} fee: {} compute: {} compute_used_so_far: {} signature: {} signer: {} success: {}",
                     idx,
                     meta.fee,
                     meta.compute_units_consumed.unwrap_or_default(),
                     compute_used_so_far,
                     &tx.transaction_signature().to_string()[..5],
-                    &tx.account_keys()[0].to_string()[..5]
+                    &tx.account_keys()[0].to_string()[..5],
+                    meta.status.is_ok()
                 );
 
                 compute_used_so_far += meta.compute_units_consumed.unwrap_or_default();
