@@ -73,13 +73,21 @@ async fn main() -> anyhow::Result<()> {
                 transactions_write_locking_account.len()
             );
 
+            let mut compute_used_so_far = 0;
             for (idx, tx) in transactions_write_locking_account {
+                let meta = tx.get_status_meta().unwrap();
+
                 println!(
-                    "idx: {} fee: {} signature: {}",
+                    "idx: {} fee: {} compute: {} compute_used_so_far: {} signature: {} signer: {}",
                     idx,
-                    tx.get_status_meta().unwrap().fee,
-                    tx.transaction_signature()
+                    meta.fee,
+                    meta.compute_units_consumed.unwrap_or_default(),
+                    compute_used_so_far,
+                    &tx.transaction_signature().to_string()[..5],
+                    &tx.account_keys()[0].to_string()[..5]
                 );
+
+                compute_used_so_far += meta.compute_units_consumed.unwrap_or_default();
             }
 
             println!();
