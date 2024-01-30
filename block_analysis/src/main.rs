@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
             let mut compute_used_so_far = 0;
 
             println!(
-                "{:<3} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
+                "{:<5} | {:<6} | {:<6} | {:<6} | {:<7} | {:<7} | {:<8}",
                 "idx", "fee", "sig", "signer", "success", "compute", "cus_so_far"
             );
             for (idx, tx) in transactions_write_locking_account {
